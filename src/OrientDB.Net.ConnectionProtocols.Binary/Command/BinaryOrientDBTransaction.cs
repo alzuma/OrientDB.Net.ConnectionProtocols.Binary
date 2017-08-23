@@ -7,6 +7,7 @@ using OrientDB.Net.Core.Exceptions;
 using OrientDB.Net.ConnectionProtocols.Binary.Operations.Results;
 using System.Linq;
 using System;
+using System.Threading.Tasks;
 
 namespace OrientDB.Net.ConnectionProtocols.Binary.Command
 {
@@ -80,6 +81,29 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Command
         public void Reset()
         {
             _records.Clear();
+        }
+
+        public async Task CommitAsync()
+        {
+            var tranResult = await _stream.SendAsync(new DatabaseCommitTransactionOperation(_records.Values, _metaData, true));
+
+            //var survivingRecords = _records.Values.Where(r => r.RecordType != TransactionRecordType.Delete).ToList();
+
+            foreach (var kvp in tranResult.CreatedRecordMapping)
+            {
+                var record = _records.First(n => n.Key.ToString() == kvp.Key.ToString()).Value;
+                record.RecordORID = kvp.Value;
+                _records.Add(record.RecordORID, record);
+            }
+
+            var versions = tranResult.UpdatedRecordVersions;
+            foreach (var kvp in versions)
+            {
+                var record = _records[kvp.Key];
+                record.Version = kvp.Value;
+            }
+
+            Reset();
         }
 
         public void Remove<T>(T entity) where T : OrientDBEntity

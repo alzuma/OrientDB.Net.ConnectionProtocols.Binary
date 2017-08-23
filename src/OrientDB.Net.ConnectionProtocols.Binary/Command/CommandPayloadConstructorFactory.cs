@@ -1,14 +1,14 @@
-﻿using OrientDB.Net.ConnectionProtocols.Binary.Core;
-using OrientDB.Net.Core.Abstractions;
+﻿using Microsoft.Extensions.Logging;
+using OrientDB.Net.ConnectionProtocols.Binary.Core;
 using System;
 
 namespace OrientDB.Net.ConnectionProtocols.Binary.Command
 {
     internal class CommandPayloadConstructorFactory : ICommandPayloadConstructorFactory
     {
-        private readonly IOrientDBLogger _logger;
+        private readonly ILogger _logger;
 
-        public CommandPayloadConstructorFactory(IOrientDBLogger logger)
+        public CommandPayloadConstructorFactory(ILogger logger)
         {
             _logger = logger ?? throw new ArgumentNullException($"{nameof(logger)} cannt be null.");
         }
