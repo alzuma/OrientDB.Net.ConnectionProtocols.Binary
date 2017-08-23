@@ -1,41 +1,43 @@
 ﻿using OrientDB.Net.ConnectionProtocols.Binary.Contracts;
 using OrientDB.Net.ConnectionProtocols.Binary.Extensions;
 using OrientDB.Net.ConnectionProtocols.Binary.Operations;
-using OrientDB.Net.Core.Abstractions;
 using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Polly;
 
 namespace OrientDB.Net.ConnectionProtocols.Binary.Core
 {
     public class OrientDBBinaryConnectionStream
     {
-        private readonly IOrientDBLogger _logger;
+        private readonly ILogger _logger;
 
         public ConnectionMetaData ConnectionMetaData { get; private set; }
         private readonly ServerConnectionOptions _connectionOptions;
 
-        private ConcurrentQueue<OrientDBNetworkConnection> _streamPool = new ConcurrentQueue<OrientDBNetworkConnection>();
-        private readonly Semaphore flowControl;
+        private readonly ConcurrentQueue<OrientDBNetworkConnection> _streamPool = new ConcurrentQueue<OrientDBNetworkConnection>();
+        private readonly Semaphore _flowControl;
 
-        internal ConcurrentQueue<OrientDBNetworkConnection> StreamPool { get { return _streamPool; } }
+        internal ConcurrentQueue<OrientDBNetworkConnection> StreamPool => _streamPool;
 
-        public OrientDBBinaryConnectionStream(ServerConnectionOptions options, IOrientDBLogger logger)
+        public OrientDBBinaryConnectionStream(ServerConnectionOptions options, ILogger logger)
         {
             _connectionOptions = options;
             _logger = logger;
 
 
-            _logger.Debug($"Creating {options.PoolSize} connections to OrientDB Server {options.HostName}");
+            _logger.LogDebug($"Creating {options.PoolSize} connections to OrientDB Server {options.HostName}");
             for (var i = 0; i < options.PoolSize; i++)
             {
                 _streamPool.Enqueue(CreateNetworkStream());
             }
 
-            flowControl = new Semaphore(options.PoolSize, options.PoolSize);
+            _flowControl = new Semaphore(options.PoolSize, options.PoolSize);
         }
 
         private OrientDBNetworkConnection CreateNetworkStream()
@@ -59,7 +61,7 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
 
         private OrientDBNetworkConnection GetNetworkStream()
         {
-            flowControl.WaitOne();
+            _flowControl.WaitOne();
             OrientDBNetworkConnection stream;
             _streamPool.TryDequeue(out stream);           
             return stream;
@@ -116,7 +118,6 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
 
         internal byte[] CreateBytes(Request request)
         {
-            byte[] bufferData;
             using (MemoryStream stream = new MemoryStream())
             {
                 foreach (RequestDataItem item in request.DataItems)
@@ -130,7 +131,7 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
                             stream.Write(item.Data, 0, item.Data.Length);
                             break;
                         case "record":
-                            bufferData = new byte[2 + item.Data.Length];
+                            var bufferData = new byte[2 + item.Data.Length];
                             Buffer.BlockCopy(BinarySerializer.ToArray(item.Data.Length), 0, bufferData, 0, 2);
                             Buffer.BlockCopy(item.Data, 0, bufferData, 2, item.Data.Length);
                             stream.Write(bufferData, 0, bufferData.Length);
@@ -154,6 +155,24 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
         private object _syncRoot = new object();
 
         private int maxAttempts = 5;
+
+        internal async Task<T> SendAsync<T>(IOrientDBOperation<T> operation)
+        {
+            var policy = Policy
+                .Handle<IOException>()
+                .WaitAndRetryAsync(
+                    maxAttempts,
+                    retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt))
+                );
+
+            return await policy.ExecuteAsync(async () =>
+            {
+                var stream = GetNetworkStream();
+                var result = await ProcessAsync(operation, stream);
+                ReturnStream(stream);
+                return result;
+            });
+        }
 
         internal T Send<T>(IOrientDBOperation<T> operation)
         {
@@ -182,6 +201,23 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
             }
 
             throw _lastException;
+        }
+
+        private async Task<T> ProcessAsync<T>(IOrientDBOperation<T> operation, OrientDBNetworkConnection stream)
+        {
+            try
+            {
+                var request = operation.CreateRequest(stream.SessionId, stream.Token);
+
+                var reader = await SendAsync(request, stream.GetStream());
+
+                return operation.Execute(reader);
+            }
+            catch
+            {
+                Destroy(stream);
+                throw;
+            }
         }
 
         private T Process<T>(IOrientDBOperation<T> operation, OrientDBNetworkConnection stream)
@@ -222,7 +258,18 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
         {    
             _streamPool.Enqueue(stream);            
 
-            flowControl.Release();
+            _flowControl.Release();
+        }
+
+        private async Task<BinaryReader> SendAsync(Request request, NetworkStream stream)
+        {
+            await SendAsync(CreateBytes(request), stream);
+            if (request.OperationMode == OperationMode.Asynchronous)
+            {
+                return null;
+            }
+
+            return GetResponseReader(stream);
         }
 
         private BinaryReader Send(Request request, NetworkStream stream)
@@ -233,6 +280,14 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
                 return null;
 
             return GetResponseReader(stream);
+        }
+
+        private async Task SendAsync(byte[] buffer, NetworkStream stream)
+        {
+            if (stream != null && stream.CanWrite)
+            {
+                await stream.WriteAsync(buffer, 0, buffer.Length);
+            }
         }
 
         private void Send(byte[] buffer, NetworkStream stream)

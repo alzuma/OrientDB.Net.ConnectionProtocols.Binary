@@ -6,6 +6,8 @@ using OrientDB.Net.Core.Abstractions;
 using OrientDB.Net.Core.Models;
 using System;
 using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace OrientDB.Net.ConnectionProtocols.Binary.Core
 {
@@ -14,9 +16,9 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
         private readonly OrientDBBinaryConnectionStream _stream;
         private readonly IOrientDBRecordSerializer<byte[]> _serializer;
         private readonly ICommandPayloadConstructorFactory _payloadFactory;
-        private readonly IOrientDBLogger _logger;
+        private readonly ILogger _logger;
 
-        internal OrientDBCommand(OrientDBBinaryConnectionStream stream, IOrientDBRecordSerializer<byte[]> serializer, ICommandPayloadConstructorFactory payloadFactory, IOrientDBLogger logger)
+        internal OrientDBCommand(OrientDBBinaryConnectionStream stream, IOrientDBRecordSerializer<byte[]> serializer, ICommandPayloadConstructorFactory payloadFactory, ILogger logger)
         {
             _stream = stream ?? throw new ArgumentNullException($"{nameof(stream)} cannot be null.");
             _serializer = serializer ?? throw new ArgumentNullException($"{nameof(serializer)} cannot be null");
@@ -34,6 +36,21 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Core
             //var results = _stream.Send(new DatabaseCommandOperation<T>(_payloadFactory, _stream.ConnectionMetaData, _serializer, _logger, query)).Results;
             var results = _stream.Send(new DocumentResultDatabaseCommandOperation(_payloadFactory, _stream.ConnectionMetaData, _serializer, query));
             return new BasicCommandResult()
+            {
+                RecordsAffected = results.Results.Count(),
+                UpdatedRecords = results.Results
+            };
+        }
+
+        public async Task<IEnumerable<T>> ExecuteAsync<T>(string query) where T : OrientDBEntity
+        {
+            return (await _stream.SendAsync(new DatabaseCommandOperation<T>(_payloadFactory, _stream.ConnectionMetaData, _serializer, _logger, query))).Results;
+        }
+
+        public async Task<IOrientDBCommandResult> ExecuteAsync(string query)
+        {
+            var results = await _stream.SendAsync(new DocumentResultDatabaseCommandOperation(_payloadFactory, _stream.ConnectionMetaData, _serializer, query));
+            return new BasicCommandResult
             {
                 RecordsAffected = results.Results.Count(),
                 UpdatedRecords = results.Results
