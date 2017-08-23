@@ -8,7 +8,7 @@ namespace OrientDB.Net.ConnectionProtocols.Binary.Contracts
         Request CreateRequest(int sessionId, byte[] token);
     }
 
-    internal interface IOrientDBOperation<T> : IOrientDBRequest
+    internal interface IOrientDBOperation<out T> : IOrientDBRequest
     {        
         T Execute(BinaryReader reader);
     }
